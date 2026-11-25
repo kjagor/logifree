@@ -12,6 +12,35 @@ public enum ThumbGesture: String, Codable, CaseIterable, CodingKeyRepresentable 
     }
 }
 
+/// What turning the side (thumb) wheel does.
+public enum ThumbwheelAction: String, Codable, CaseIterable {
+    case horizontalScroll, smoothScroll, volume, zoom, tabs, desktops
+
+    /// Diverted rotation counts per step. The MX Master 4 reports 120 diverted counts
+    /// where it natively reports 20, so 6 counts = one native scroll increment.
+    // shortcut: fixed step size, make it a setting if it feels wrong
+    public var stepSize: Int { self == .volume ? 6 : 12 }
+}
+
+/// Turns diverted thumb wheel rotation into whole steps, keeping the remainder.
+public struct ThumbwheelStepper {
+    private var accumulated = 0
+    private var lastMovement: TimeInterval = 0
+
+    public init() {}
+
+    /// Steps to fire now, signed like `rotation`. `now` is any monotonic clock in seconds.
+    public mutating func steps(rotation: Int, stepSize: Int, now: TimeInterval) -> Int {
+        // A pause or a reversal starts over, so stale leftovers never fire a step.
+        if now - lastMovement > 1 || (rotation < 0) != (accumulated < 0) { accumulated = 0 }
+        lastMovement = now
+        accumulated += rotation
+        let steps = accumulated / stepSize
+        accumulated -= steps * stepSize
+        return steps
+    }
+}
+
 public struct KeyCombo: Codable, Hashable {
     /// macOS virtual key code; `nil` until one is recorded.
     public var key: UInt16?
@@ -41,24 +70,44 @@ public enum Action: Codable, Hashable {
     case shell(String)
 }
 
+/// "Open folder" is stored as a plain shell action: `open '<path>'`, with `'` written as `'\''`.
+public func openFolderCommand(_ path: String) -> String {
+    "open '" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+/// The folder path if `command` is exactly what `openFolderCommand` produces, else nil.
+public func openFolderPath(_ command: String) -> String? {
+    guard command.hasPrefix("open '"), command.hasSuffix("'"), command.count > 7 else { return nil }
+    let path = command.dropFirst(6).dropLast().replacingOccurrences(of: "'\\''", with: "\u{0}")
+    return path.contains("'") ? nil : path.replacingOccurrences(of: "\u{0}", with: "'")
+}
+
 /// Lives in `~/Library/Application Support/logifree/settings.json`. The app writes
 /// it and posts `reloadNotification`; the agent re-reads and re-applies.
 public struct Settings: Codable, Equatable {
     public var invertWheel = true
     public var invertThumbwheel = true
-    public var gestures: [ThumbGesture: Action] = [
+    public var thumbwheelAction = ThumbwheelAction.horizontalScroll
+    private static let defaultGestures: [ThumbGesture: Action] = [
         .click: .missionControl,
         .swipeUp: .missionControl,
         .swipeDown: .appExpose,
         .swipeLeft: .desktopLeft,
         .swipeRight: .desktopRight,
     ]
+    /// Small gesture button (or the middle-button fallback).
+    public var gestures = Settings.defaultGestures
+    /// Haptic panel on mice that have one (MX Master 4).
+    public var panelGestures = Settings.defaultGestures
     public var swipeThreshold = 50
     /// Slow wheel clicks scroll at least this many lines; 1 = macOS default.
     /// Faster scrolling, which macOS already accelerates past this, is untouched.
     public var minimumLinesPerClick = 2
     /// System-wide key → key remaps for every keyboard.
     public var keyRemaps: [KeyRemap] = []
+    /// Pushing the scroll wheel sideways, on mice with a tilt wheel. nil = the mouse's own horizontal scroll.
+    public var tiltLeft: Action?
+    public var tiltRight: Action?
 
     public init() {}
 
@@ -68,11 +117,17 @@ public struct Settings: Codable, Equatable {
         let defaults = Settings()
         invertWheel = try container.decodeIfPresent(Bool.self, forKey: .invertWheel) ?? defaults.invertWheel
         invertThumbwheel = try container.decodeIfPresent(Bool.self, forKey: .invertThumbwheel) ?? defaults.invertThumbwheel
+        thumbwheelAction = try container.decodeIfPresent(ThumbwheelAction.self, forKey: .thumbwheelAction)
+            ?? defaults.thumbwheelAction
         gestures = try container.decodeIfPresent([ThumbGesture: Action].self, forKey: .gestures) ?? defaults.gestures
+        // Old files had one set for both buttons: keep that behaviour.
+        panelGestures = try container.decodeIfPresent([ThumbGesture: Action].self, forKey: .panelGestures) ?? gestures
         swipeThreshold = try container.decodeIfPresent(Int.self, forKey: .swipeThreshold) ?? defaults.swipeThreshold
         minimumLinesPerClick = try container.decodeIfPresent(Int.self, forKey: .minimumLinesPerClick)
             ?? defaults.minimumLinesPerClick
         keyRemaps = try container.decodeIfPresent([KeyRemap].self, forKey: .keyRemaps) ?? defaults.keyRemaps
+        tiltLeft = try container.decodeIfPresent(Action.self, forKey: .tiltLeft)
+        tiltRight = try container.decodeIfPresent(Action.self, forKey: .tiltRight)
     }
 
     public static let directory = FileManager.default.homeDirectoryForCurrentUser
@@ -125,9 +180,12 @@ public struct AgentStatus: Codable {
         public var canForget: Bool
         /// The channel it announced switching to; it's about to leave this Mac.
         public var switchedTo: UInt8?
+        /// Has a tilt scroll wheel whose sides can be reassigned.
+        public var hasTilt: Bool
 
         public init(name: String, isMouse: Bool, route: String, problem: String?,
-                    slots: [HostSlot], canForget: Bool, switchedTo: UInt8?) {
+                    slots: [HostSlot], canForget: Bool, switchedTo: UInt8?, hasTilt: Bool) {
+            self.hasTilt = hasTilt
             self.name = name
             self.isMouse = isMouse
             self.route = route
@@ -135,6 +193,19 @@ public struct AgentStatus: Codable {
             self.slots = slots
             self.canForget = canForget
             self.switchedTo = switchedTo
+        }
+
+        // An old status file has no hasTilt.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            isMouse = try container.decode(Bool.self, forKey: .isMouse)
+            route = try container.decode(String.self, forKey: .route)
+            problem = try container.decodeIfPresent(String.self, forKey: .problem)
+            slots = try container.decode([HostSlot].self, forKey: .slots)
+            canForget = try container.decode(Bool.self, forKey: .canForget)
+            switchedTo = try container.decodeIfPresent(UInt8.self, forKey: .switchedTo)
+            hasTilt = try container.decodeIfPresent(Bool.self, forKey: .hasTilt) ?? false
         }
     }
 

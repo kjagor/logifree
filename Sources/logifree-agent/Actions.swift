@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 import LogifreeCore
@@ -24,9 +25,32 @@ extension Action {
     }
 }
 
+extension ThumbwheelAction {
+    /// One step. `forward` = louder, zoom in, next tab, desktop to the right.
+    func perform(forward: Bool) {
+        switch self {
+        case .horizontalScroll, .smoothScroll: break // native / posted per report, never stepped
+        case .volume: postMediaKey(forward ? NX_KEYTYPE_SOUND_UP : NX_KEYTYPE_SOUND_DOWN)
+        case .zoom: postKey(forward ? 24 : 27, .maskCommand) // ⌘= / ⌘-
+        case .tabs: postKey(48, forward ? .maskControl : [.maskControl, .maskShift]) // ⌃Tab / ⌃⇧Tab
+        case .desktops: SymbolicHotKey.post(forward ? 81 : 79)
+        }
+    }
+}
+
+/// The volume keys aren't ordinary keys: they travel as system-defined events, subtype 8.
+private func postMediaKey(_ key: Int32) {
+    for state in [0xA, 0xB] { // down, up
+        NSEvent.otherEvent(
+            with: .systemDefined, location: .zero, modifierFlags: .init(rawValue: UInt(state << 8)), timestamp: 0,
+            windowNumber: 0, context: nil, subtype: 8, data1: Int(key) << 16 | state << 8, data2: -1
+        )?.cgEvent?.post(tap: .cghidEventTap)
+    }
+}
+
 private let eventSource = CGEventSource(stateID: .hidSystemState)
 
-private func postKey(_ key: CGKeyCode, _ flags: CGEventFlags) {
+func postKey(_ key: CGKeyCode, _ flags: CGEventFlags) {
     for down in [true, false] {
         guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: key, keyDown: down) else { return }
         event.flags = flags
@@ -46,7 +70,7 @@ private func postMiddleClick() {
 /// Triggers macOS's own shortcuts (Mission Control, move a space, …) by posting
 /// the exact key combo the system has bound to them, enabling the binding for an
 /// instant if it's switched off. Same trick as v3rm0n/logid (MIT) and Mouser.
-private enum SymbolicHotKey {
+enum SymbolicHotKey {
     private typealias GetValue = @convention(c) (
         UInt32, UnsafeMutablePointer<UInt16>, UnsafeMutablePointer<UInt16>, UnsafeMutablePointer<UInt32>
     ) -> Int32

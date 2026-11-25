@@ -86,5 +86,68 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(decoded.swipeThreshold, 50)
         XCTAssertEqual(decoded.minimumLinesPerClick, 2)
         XCTAssertEqual(decoded.keyRemaps, [])
+        XCTAssertEqual(decoded.thumbwheelAction, .horizontalScroll)
+        let smooth = try JSONDecoder().decode(Settings.self, from: Data(#"{"thumbwheelAction":"smoothScroll"}"#.utf8))
+        XCTAssertEqual(smooth.thumbwheelAction, .smoothScroll)
+    }
+
+    func testTiltActionsDefaultToNil() throws {
+        let decoded = try JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
+        XCTAssertNil(decoded.tiltLeft)
+        XCTAssertNil(decoded.tiltRight)
+    }
+
+    func testStatusDeviceWithoutHasTiltDecodesAsFalse() throws {
+        let json = #"{"name":"M","isMouse":true,"route":"Bluetooth","slots":[],"canForget":false}"#
+        XCTAssertFalse(try JSONDecoder().decode(AgentStatus.DeviceState.self, from: Data(json.utf8)).hasTilt)
+    }
+
+    func testThumbwheelStepperAccumulatesAndKeepsRemainder() {
+        var stepper = ThumbwheelStepper()
+        XCTAssertEqual(stepper.steps(rotation: 5, stepSize: 12, now: 10.0), 0)
+        XCTAssertEqual(stepper.steps(rotation: 9, stepSize: 12, now: 10.1), 1) // 14: one step, 2 left
+        XCTAssertEqual(stepper.steps(rotation: 22, stepSize: 12, now: 10.2), 2) // 24: two steps, 0 left
+        XCTAssertEqual(stepper.steps(rotation: -30, stepSize: 12, now: 10.3), -2) // -6 left
+        XCTAssertEqual(stepper.steps(rotation: -6, stepSize: 12, now: 10.4), -1)
+    }
+
+    func testThumbwheelStepperResetsOnReversalAndPause() {
+        var stepper = ThumbwheelStepper()
+        XCTAssertEqual(stepper.steps(rotation: 11, stepSize: 12, now: 10.0), 0)
+        XCTAssertEqual(stepper.steps(rotation: -11, stepSize: 12, now: 10.1), 0) // reversal drops the 11
+        XCTAssertEqual(stepper.steps(rotation: -1, stepSize: 12, now: 10.2), -1)
+        XCTAssertEqual(stepper.steps(rotation: 11, stepSize: 12, now: 10.3), 0)
+        XCTAssertEqual(stepper.steps(rotation: 1, stepSize: 12, now: 12.0), 0) // pause drops the 11
+    }
+
+    func testPanelGesturesDefaultToGesturesInOldFiles() throws {
+        var old = Settings()
+        old.gestures[.click] = .shell("open -a Notes")
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as! [String: Any]
+        json["panelGestures"] = nil
+        let decoded = try JSONDecoder().decode(Settings.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(decoded.panelGestures, decoded.gestures)
+        XCTAssertEqual(decoded.panelGestures[.click], .shell("open -a Notes"))
+    }
+
+    func testPanelGesturesStayDistinctWhenPresent() throws {
+        var settings = Settings()
+        settings.panelGestures[.click] = .showDesktop
+        let decoded = try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(decoded.panelGestures[.click], .showDesktop)
+        XCTAssertEqual(decoded.gestures[.click], .missionControl)
+    }
+}
+
+final class OpenFolderTests: XCTestCase {
+    func testRoundTrip() {
+        for path in ["/Users/me/Docs", "/tmp/lf test/dir", "/tmp/lf test/it's", "/a/''/b"] {
+            XCTAssertEqual(openFolderPath(openFolderCommand(path)), path)
+        }
+        XCTAssertEqual(openFolderCommand("/tmp/it's"), "open '/tmp/it'\\''s'")
+    }
+
+    func testOtherShellCommandIsNotAFolder() {
+        XCTAssertNil(openFolderPath("open -a Notes"))
     }
 }

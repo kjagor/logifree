@@ -11,7 +11,9 @@ struct ContentView: View {
             agentSection
             devicesSection
             scrollingSection
+            tiltSection
             gestureSection
+            panelGestureSection
             advancedSection
         }
         .formStyle(.grouped)
@@ -107,6 +109,14 @@ struct ContentView: View {
         Section {
             Toggle("Reverse scroll wheel", isOn: $model.settings.invertWheel)
             Toggle("Reverse thumb wheel", isOn: $model.settings.invertThumbwheel)
+            Picker("Thumb wheel", selection: $model.settings.thumbwheelAction) {
+                Text("Horizontal scroll").tag(ThumbwheelAction.horizontalScroll)
+                Text("Smooth horizontal scroll").tag(ThumbwheelAction.smoothScroll)
+                Text("Volume").tag(ThumbwheelAction.volume)
+                Text("Zoom").tag(ThumbwheelAction.zoom)
+                Text("Switch tabs").tag(ThumbwheelAction.tabs)
+                Text("Switch desktops").tag(ThumbwheelAction.desktops)
+            }
             Picker("Distance per click", selection: $model.settings.minimumLinesPerClick) {
                 Text("macOS default").tag(1)
                 Text("2 lines").tag(2)
@@ -118,6 +128,26 @@ struct ContentView: View {
         } footer: {
             Text("A slow click scrolls at least this far. Faster scrolling keeps macOS's own acceleration. Your trackpad isn't affected.")
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var tiltSection: some View {
+        if model.agentStatus?.devices.contains(where: \.hasTilt) == true {
+            Section {
+                HStack(spacing: 10) {
+                    GestureCell(title: "Left", symbol: "arrow.left.to.line", noneTitle: "Horizontal scroll",
+                                action: $model.settings.tiltLeft)
+                    GestureCell(title: "Right", symbol: "arrow.right.to.line", noneTitle: "Horizontal scroll",
+                                action: $model.settings.tiltRight)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            } header: {
+                Text("Wheel tilt")
+            } footer: {
+                Text("Push the scroll wheel sideways, on mice with a tilt wheel such as the MX Anywhere 2S.")
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -142,6 +172,17 @@ struct ContentView: View {
             Text("Gesture button")
         } footer: {
             Text("Click the thumb button, or hold it and move the mouse in a direction. On mice without one, such as the MX Anywhere, the middle button takes its place.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var panelGestureSection: some View {
+        Section {
+            GesturePad(gestures: $model.settings.panelGestures)
+        } header: {
+            Text("Haptic panel")
+        } footer: {
+            Text("Click the thumb-rest panel on mice that have one, such as the MX Master 4, or hold it and move the mouse.")
                 .foregroundStyle(.secondary)
         }
     }

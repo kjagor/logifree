@@ -1,3 +1,4 @@
+import AppKit
 import LogifreeCore
 import SwiftUI
 
@@ -28,15 +29,19 @@ struct GesturePad: View {
     }
 
     private func cell(_ gesture: ThumbGesture) -> some View {
-        GestureCell(gesture: gesture, action: Binding(
+        GestureCell(title: gesture.title, symbol: gesture.symbol, action: Binding(
             get: { gestures[gesture] },
             set: { gestures[gesture] = $0 }
         ))
     }
 }
 
-private struct GestureCell: View {
-    let gesture: ThumbGesture
+/// A labelled action menu plus the rows that configure the chosen action.
+struct GestureCell: View {
+    let title: String
+    let symbol: String
+    /// What the nil choice is called.
+    var noneTitle = "Nothing"
     @Binding var action: Action?
 
     var body: some View {
@@ -46,10 +51,17 @@ private struct GestureCell: View {
                 .foregroundStyle(.secondary)
             Picker(title, selection: Binding(
                 get: { ActionChoice(action) },
-                set: { if $0 != ActionChoice(action) { action = $0.action } }
+                set: {
+                    guard $0 != ActionChoice(action) else { return }
+                    if $0 == .folder {
+                        if let path = chooseFolder(startingAt: nil) { action = .shell(openFolderCommand(path)) }
+                    } else {
+                        action = $0.action
+                    }
+                }
             )) {
                 ForEach(ActionChoice.allCases, id: \.self) { choice in
-                    Text(choice.title).tag(choice)
+                    Text(choice == .none ? noneTitle : choice.title).tag(choice)
                     if choice == .desktopRight { Divider() }
                 }
             }
@@ -59,7 +71,19 @@ private struct GestureCell: View {
                 ShortcutRecorder(combo: Binding(get: { combo }, set: { action = .keystroke($0) }))
                     .frame(width: 148)
             }
-            if case .shell(let command) = action {
+            if case .shell(let command) = action, let path = openFolderPath(command) {
+                HStack {
+                    Text(URL(fileURLWithPath: path).lastPathComponent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(path)
+                    Button("Choose…") {
+                        if let new = chooseFolder(startingAt: path) { action = .shell(openFolderCommand(new)) }
+                    }
+                }
+                .font(.caption)
+                .frame(width: 148)
+            } else if case .shell(let command) = action {
                 TextField("open -a Notes", text: Binding(get: { command }, set: { action = .shell($0) }))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.caption, design: .monospaced))
@@ -68,8 +92,20 @@ private struct GestureCell: View {
         }
     }
 
-    private var title: String {
-        switch gesture {
+    private func chooseFolder(startingAt path: String?) -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: path ?? NSHomeDirectory())
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+}
+
+private extension ThumbGesture {
+    var title: String {
+        switch self {
         case .click: "Click"
         case .swipeUp: "Up"
         case .swipeDown: "Down"
@@ -78,8 +114,8 @@ private struct GestureCell: View {
         }
     }
 
-    private var symbol: String {
-        switch gesture {
+    var symbol: String {
+        switch self {
         case .click: "circle.circle"
         case .swipeUp: "arrow.up"
         case .swipeDown: "arrow.down"
@@ -90,7 +126,7 @@ private struct GestureCell: View {
 }
 
 private enum ActionChoice: CaseIterable, Hashable {
-    case none, missionControl, appExpose, showDesktop, desktopLeft, desktopRight, middleClick, keystroke, shell
+    case none, missionControl, appExpose, showDesktop, desktopLeft, desktopRight, middleClick, keystroke, folder, shell
 
     init(_ action: Action?) {
         switch action {
@@ -102,7 +138,7 @@ private enum ActionChoice: CaseIterable, Hashable {
         case .desktopRight: self = .desktopRight
         case .middleClick: self = .middleClick
         case .keystroke: self = .keystroke
-        case .shell: self = .shell
+        case .shell(let command): self = openFolderPath(command) == nil ? .shell : .folder
         }
     }
 
@@ -116,6 +152,7 @@ private enum ActionChoice: CaseIterable, Hashable {
         case .desktopRight: "Next desktop"
         case .middleClick: "Middle click"
         case .keystroke: "Keyboard shortcut"
+        case .folder: "Open folder"
         case .shell: "Shell command"
         }
     }
@@ -130,7 +167,7 @@ private enum ActionChoice: CaseIterable, Hashable {
         case .desktopRight: .desktopRight
         case .middleClick: .middleClick
         case .keystroke: .keystroke(.unset)
-        case .shell: .shell("")
+        case .folder, .shell: .shell("")
         }
     }
 }
