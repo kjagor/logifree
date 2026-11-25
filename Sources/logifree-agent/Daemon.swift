@@ -5,15 +5,20 @@ import LogifreeCore
 /// Applies `Settings` to every Logitech device as it connects, and turns gesture
 /// button events into actions. Idle = parked in the run loop; nothing polls.
 final class Daemon {
+    // shortcut: fixed speed, make it a setting if it feels wrong
+    private static let pixelsPerCount = 2 // 6 counts per native increment = 12 px
+
     /// A connected device plus the agent's bookkeeping for it.
     private final class Tracked {
         let device: Device
-        /// The control acting as gesture button: thumb button, or middle button on
-        /// mice without one (e.g. MX Anywhere). Nil without either.
-        var gestureButton: [UInt8]?
-        var gestureHeld = false
+        /// Controls acting as gesture buttons: haptic panel and/or thumb button, or
+        /// the middle button on mice without either (e.g. MX Anywhere).
+        var gestureButtons: [[UInt8]] = []
+        /// Which gesture button is down, if any.
+        var gestureHeld: [UInt8]?
         var gestureDX = 0
         var gestureDY = 0
+        var thumbwheel = ThumbwheelStepper()
         var configureGeneration = 0
         /// Configured and still on this Mac; only these are reported to the app.
         var configured = false
@@ -32,6 +37,7 @@ final class Daemon {
     private var failure: AgentStatus.Failure?
 
     private static let thumbButton: [UInt8] = [0x00, 0xC3]
+    private static let hapticPanel: [UInt8] = [0x01, 0xA0] // MX Master 4 haptic panel (seen as cid 0x01A0, 2026-11-24)
     private static let middleButton: [UInt8] = [0x00, 0x52]
 
     func run() -> Never {
@@ -65,7 +71,9 @@ final class Daemon {
         scrollTap.minimumLines = settings.minimumLinesPerClick // also retries the tap once Accessibility is granted
         if settings.keyRemaps != old.keyRemaps { applyKeyRemaps() }
         if settings.invertWheel != old.invertWheel || settings.invertThumbwheel != old.invertThumbwheel
-            || divertsGesture(settings) != divertsGesture(old) {
+            || settings.thumbwheelAction != old.thumbwheelAction
+            || divertsGesture(settings.gestures) != divertsGesture(old.gestures)
+            || divertsGesture(settings.panelGestures) != divertsGesture(old.panelGestures) {
             Log.info("settings changed: reconfiguring devices")
             tracked.forEach { scheduleConfigure($0, after: 0) }
         }
@@ -73,8 +81,8 @@ final class Daemon {
     }
 
     /// Whether any gesture does something, so the button needs diverting.
-    private func divertsGesture(_ settings: Settings) -> Bool {
-        settings.gestures.values.contains { $0 != .keystroke(.unset) && $0 != .shell("") }
+    private func divertsGesture(_ gestures: [ThumbGesture: Action]) -> Bool {
+        gestures.values.contains { $0 != .keystroke(.unset) && $0 != .shell("") }
     }
 
     /// Puts devices back to how they'd be without Logifree, then exits cleanly so
@@ -83,7 +91,9 @@ final class Daemon {
         Log.info("quitting: restoring devices")
         settings.invertWheel = false
         settings.invertThumbwheel = false
+        settings.thumbwheelAction = .horizontalScroll
         settings.gestures = [:]
+        settings.panelGestures = [:]
         settings.keyRemaps = []
         scrollTap.minimumLines = 1
         applyKeyRemaps()
@@ -163,23 +173,41 @@ final class Daemon {
             writeStatus()
         } else if report[2] == entry.device.cachedIndex(HIDPP.Feature.reprogControls) {
             if function == 0 { divertedButtons(entry, params) }
-            if function == 1, entry.gestureHeld {
+            if function == 1, entry.gestureHeld != nil {
                 entry.gestureDX += Int(Int16(bitPattern: UInt16(params[0]) << 8 | UInt16(params[1])))
                 entry.gestureDY += Int(Int16(bitPattern: UInt16(params[2]) << 8 | UInt16(params[3])))
             }
+        } else if report[2] == entry.device.cachedIndex(HIDPP.Feature.thumbwheel), function == 0,
+                  settings.thumbwheelAction != .horizontalScroll {
+            // Diverted rotation: signed 16-bit big-endian. The device's own invert flag is off in this mode.
+            let rotation = Int(Int16(bitPattern: UInt16(params[0]) << 8 | UInt16(params[1])))
+            let signed = settings.invertThumbwheel ? -rotation : rotation
+            if settings.thumbwheelAction == .smoothScroll {
+                // Continuous pixel events: apps like draw.io pan on these but zoom on line-based wheel events.
+                let pixels = signed * Self.pixelsPerCount
+                if pixels != 0 {
+                    CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0,
+                            wheel2: Int32(pixels), wheel3: 0)?.post(tap: .cgSessionEventTap)
+                }
+                return
+            }
+            let steps = entry.thumbwheel.steps(
+                rotation: signed,
+                stepSize: settings.thumbwheelAction.stepSize, now: ProcessInfo.processInfo.systemUptime)
+            for _ in 0..<abs(steps) { settings.thumbwheelAction.perform(forward: steps > 0) }
         }
     }
 
     private func divertedButtons(_ entry: Tracked, _ params: [UInt8]) {
-        let pressed = stride(from: 0, to: 8, by: 2).contains { Array(params[$0...$0 + 1]) == entry.gestureButton }
-        if pressed && !entry.gestureHeld {
-            entry.gestureHeld = true
+        let down = stride(from: 0, to: 8, by: 2).map { Array(params[$0...$0 + 1]) }
+        if entry.gestureHeld == nil, let button = entry.gestureButtons.first(where: down.contains) {
+            entry.gestureHeld = button
             entry.gestureDX = 0
             entry.gestureDY = 0
-        } else if !pressed && entry.gestureHeld {
-            entry.gestureHeld = false
+        } else if let button = entry.gestureHeld, !down.contains(button) {
+            entry.gestureHeld = nil
             let gesture = ThumbGesture.classify(dx: entry.gestureDX, dy: entry.gestureDY, threshold: settings.swipeThreshold)
-            settings.gestures[gesture]?.perform()
+            (button == Self.hapticPanel ? settings.panelGestures : settings.gestures)[gesture]?.perform()
         }
     }
 
@@ -201,7 +229,7 @@ final class Daemon {
     private func configure(_ entry: Tracked) -> Bool {
         let device = entry.device
         device.resetFeatures()
-        entry.gestureHeld = false
+        entry.gestureHeld = nil
         guard device.ping() else { return false }
         device.loadIdentity()
         _ = device.has(HIDPP.Feature.wirelessStatus) // cache its index to spot reconnects
@@ -223,17 +251,21 @@ final class Daemon {
             }
         }
         if device.has(HIDPP.Feature.thumbwheel) {
-            attempt(settings.invertThumbwheel ? "thumb wheel inverted" : "thumb wheel normal") {
-                try device.call(HIDPP.Feature.thumbwheel, 2, [0, settings.invertThumbwheel ? 1 : 0])
+            let divert = settings.thumbwheelAction != .horizontalScroll
+            attempt("thumb wheel: \(settings.thumbwheelAction.rawValue)\(settings.invertThumbwheel ? ", inverted" : "")") {
+                // setReporting [diverted, inverted]. Diverted, the inversion is done in software.
+                try device.call(HIDPP.Feature.thumbwheel, 2, divert ? [1, 0] : [0, settings.invertThumbwheel ? 1 : 0])
             }
         }
         // getCidReporting fails for a control the mouse doesn't have.
-        entry.gestureButton = !device.isMouse ? nil : [Self.thumbButton, Self.middleButton].first { button in
-            (try? device.call(HIDPP.Feature.reprogControls, 2, button)) != nil
+        func answers(_ button: [UInt8]) -> Bool { (try? device.call(HIDPP.Feature.reprogControls, 2, button)) != nil }
+        entry.gestureButtons = !device.isMouse ? [] : [Self.hapticPanel, Self.thumbButton].filter(answers)
+        if entry.gestureButtons.isEmpty && device.isMouse && answers(Self.middleButton) {
+            entry.gestureButtons = [Self.middleButton]
         }
-        if let button = entry.gestureButton {
-            let divert = divertsGesture(settings)
-            let name = button == Self.thumbButton ? "gesture button" : "middle button"
+        for button in entry.gestureButtons {
+            let divert = divertsGesture(button == Self.hapticPanel ? settings.panelGestures : settings.gestures)
+            let name = button == Self.hapticPanel ? "haptic panel" : button == Self.thumbButton ? "gesture button" : "middle button"
             attempt(divert ? "\(name) diverted" : "\(name) native") {
                 // setCidReporting flags: divert (bit 0, valid bit 1), raw XY (bit 4, valid
                 // bit 5) so swipes can be measured. Undiverting = valid bits, values 0.
