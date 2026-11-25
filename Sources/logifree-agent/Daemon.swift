@@ -18,6 +18,10 @@ final class Daemon {
         var gestureHeld: [UInt8]?
         var gestureDX = 0
         var gestureDY = 0
+        /// Mouse answers for the wheel tilt controls.
+        var hasTilt = false
+        /// Tilt controls currently pushed, so a held tilt fires once.
+        var tiltDown: [[UInt8]] = []
         var thumbwheel = ThumbwheelStepper()
         var configureGeneration = 0
         /// Configured and still on this Mac; only these are reported to the app.
@@ -39,6 +43,9 @@ final class Daemon {
     private static let thumbButton: [UInt8] = [0x00, 0xC3]
     private static let hapticPanel: [UInt8] = [0x01, 0xA0] // MX Master 4 haptic panel (seen as cid 0x01A0, 2026-11-24)
     private static let middleButton: [UInt8] = [0x00, 0x52]
+    private var tilts: [(control: [UInt8], action: Action?)] {
+        [([0x00, 0x5B], settings.tiltLeft), ([0x00, 0x5D], settings.tiltRight)]
+    }
 
     func run() -> Never {
         Log.info("logifree agent started")
@@ -73,7 +80,9 @@ final class Daemon {
         if settings.invertWheel != old.invertWheel || settings.invertThumbwheel != old.invertThumbwheel
             || settings.thumbwheelAction != old.thumbwheelAction
             || divertsGesture(settings.gestures) != divertsGesture(old.gestures)
-            || divertsGesture(settings.panelGestures) != divertsGesture(old.panelGestures) {
+            || divertsGesture(settings.panelGestures) != divertsGesture(old.panelGestures)
+            || isRealAction(settings.tiltLeft) != isRealAction(old.tiltLeft)
+            || isRealAction(settings.tiltRight) != isRealAction(old.tiltRight) {
             Log.info("settings changed: reconfiguring devices")
             tracked.forEach { scheduleConfigure($0, after: 0) }
         }
@@ -82,7 +91,12 @@ final class Daemon {
 
     /// Whether any gesture does something, so the button needs diverting.
     private func divertsGesture(_ gestures: [ThumbGesture: Action]) -> Bool {
-        gestures.values.contains { $0 != .keystroke(.unset) && $0 != .shell("") }
+        gestures.values.contains { isRealAction($0) }
+    }
+
+    /// An action that does something (not unset, not an empty shortcut or command).
+    private func isRealAction(_ action: Action?) -> Bool {
+        action != nil && action != .keystroke(.unset) && action != .shell("")
     }
 
     /// Puts devices back to how they'd be without Logifree, then exits cleanly so
@@ -94,6 +108,8 @@ final class Daemon {
         settings.thumbwheelAction = .horizontalScroll
         settings.gestures = [:]
         settings.panelGestures = [:]
+        settings.tiltLeft = nil
+        settings.tiltRight = nil
         settings.keyRemaps = []
         scrollTap.minimumLines = 1
         applyKeyRemaps()
@@ -110,7 +126,8 @@ final class Daemon {
                 problem: entry.problem,
                 slots: entry.slots,
                 canForget: entry.canForget,
-                switchedTo: entry.switchedTo
+                switchedTo: entry.switchedTo,
+                hasTilt: entry.hasTilt
             )
         }
         AgentStatus(accessibility: AXIsProcessTrusted(), devices: devices, failure: failure).save()
@@ -200,6 +217,14 @@ final class Daemon {
 
     private func divertedButtons(_ entry: Tracked, _ params: [UInt8]) {
         let down = stride(from: 0, to: 8, by: 2).map { Array(params[$0...$0 + 1]) }
+        for (control, action) in tilts where entry.hasTilt {
+            if !down.contains(control) {
+                entry.tiltDown.removeAll { $0 == control }
+            } else if !entry.tiltDown.contains(control) {
+                entry.tiltDown.append(control)
+                action?.perform()
+            }
+        }
         if entry.gestureHeld == nil, let button = entry.gestureButtons.first(where: down.contains) {
             entry.gestureHeld = button
             entry.gestureDX = 0
@@ -230,6 +255,7 @@ final class Daemon {
         let device = entry.device
         device.resetFeatures()
         entry.gestureHeld = nil
+        entry.tiltDown = []
         guard device.ping() else { return false }
         device.loadIdentity()
         _ = device.has(HIDPP.Feature.wirelessStatus) // cache its index to spot reconnects
@@ -277,6 +303,18 @@ final class Daemon {
                 }
             }
         }
+        entry.hasTilt = false
+        var tiltDiverted = false
+        for (control, action) in tilts where answers(control) {
+            entry.hasTilt = true
+            let divert = isRealAction(action)
+            do {
+                // Divert only: no raw XY. Undiverting = valid bit, value 0.
+                try device.call(HIDPP.Feature.reprogControls, 3, control + [divert ? 0x03 : 0x02])
+                tiltDiverted = tiltDiverted || divert
+            } catch { problems.append("wheel tilt failed: \(error)") }
+        }
+        if tiltDiverted { applied.append("wheel tilt diverted") }
         loadSlots(entry)
         entry.switchedTo = nil
         entry.configured = true

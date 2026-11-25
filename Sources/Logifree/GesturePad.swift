@@ -29,15 +29,19 @@ struct GesturePad: View {
     }
 
     private func cell(_ gesture: ThumbGesture) -> some View {
-        GestureCell(gesture: gesture, action: Binding(
+        GestureCell(title: gesture.title, symbol: gesture.symbol, action: Binding(
             get: { gestures[gesture] },
             set: { gestures[gesture] = $0 }
         ))
     }
 }
 
-private struct GestureCell: View {
-    let gesture: ThumbGesture
+/// A labelled action menu plus the rows that configure the chosen action.
+struct GestureCell: View {
+    let title: String
+    let symbol: String
+    /// What the nil choice is called.
+    var noneTitle = "Nothing"
     @Binding var action: Action?
 
     var body: some View {
@@ -57,7 +61,7 @@ private struct GestureCell: View {
                 }
             )) {
                 ForEach(ActionChoice.allCases, id: \.self) { choice in
-                    Text(choice.title).tag(choice)
+                    Text(choice == .none ? noneTitle : choice.title).tag(choice)
                     if choice == .desktopRight { Divider() }
                 }
             }
@@ -97,8 +101,11 @@ private struct GestureCell: View {
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
-    private var title: String {
-        switch gesture {
+}
+
+private extension ThumbGesture {
+    var title: String {
+        switch self {
         case .click: "Click"
         case .swipeUp: "Up"
         case .swipeDown: "Down"
@@ -107,8 +114,8 @@ private struct GestureCell: View {
         }
     }
 
-    private var symbol: String {
-        switch gesture {
+    var symbol: String {
+        switch self {
         case .click: "circle.circle"
         case .swipeUp: "arrow.up"
         case .swipeDown: "arrow.down"

@@ -105,6 +105,9 @@ public struct Settings: Codable, Equatable {
     public var minimumLinesPerClick = 2
     /// System-wide key → key remaps for every keyboard.
     public var keyRemaps: [KeyRemap] = []
+    /// Pushing the scroll wheel sideways, on mice with a tilt wheel. nil = the mouse's own horizontal scroll.
+    public var tiltLeft: Action?
+    public var tiltRight: Action?
 
     public init() {}
 
@@ -123,6 +126,8 @@ public struct Settings: Codable, Equatable {
         minimumLinesPerClick = try container.decodeIfPresent(Int.self, forKey: .minimumLinesPerClick)
             ?? defaults.minimumLinesPerClick
         keyRemaps = try container.decodeIfPresent([KeyRemap].self, forKey: .keyRemaps) ?? defaults.keyRemaps
+        tiltLeft = try container.decodeIfPresent(Action.self, forKey: .tiltLeft)
+        tiltRight = try container.decodeIfPresent(Action.self, forKey: .tiltRight)
     }
 
     public static let directory = FileManager.default.homeDirectoryForCurrentUser
@@ -175,9 +180,12 @@ public struct AgentStatus: Codable {
         public var canForget: Bool
         /// The channel it announced switching to; it's about to leave this Mac.
         public var switchedTo: UInt8?
+        /// Has a tilt scroll wheel whose sides can be reassigned.
+        public var hasTilt: Bool
 
         public init(name: String, isMouse: Bool, route: String, problem: String?,
-                    slots: [HostSlot], canForget: Bool, switchedTo: UInt8?) {
+                    slots: [HostSlot], canForget: Bool, switchedTo: UInt8?, hasTilt: Bool) {
+            self.hasTilt = hasTilt
             self.name = name
             self.isMouse = isMouse
             self.route = route
@@ -185,6 +193,19 @@ public struct AgentStatus: Codable {
             self.slots = slots
             self.canForget = canForget
             self.switchedTo = switchedTo
+        }
+
+        // An old status file has no hasTilt.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            isMouse = try container.decode(Bool.self, forKey: .isMouse)
+            route = try container.decode(String.self, forKey: .route)
+            problem = try container.decodeIfPresent(String.self, forKey: .problem)
+            slots = try container.decode([HostSlot].self, forKey: .slots)
+            canForget = try container.decode(Bool.self, forKey: .canForget)
+            switchedTo = try container.decodeIfPresent(UInt8.self, forKey: .switchedTo)
+            hasTilt = try container.decodeIfPresent(Bool.self, forKey: .hasTilt) ?? false
         }
     }
 

@@ -11,6 +11,7 @@ struct ContentView: View {
             agentSection
             devicesSection
             scrollingSection
+            tiltSection
             gestureSection
             panelGestureSection
             advancedSection
@@ -127,6 +128,26 @@ struct ContentView: View {
         } footer: {
             Text("A slow click scrolls at least this far. Faster scrolling keeps macOS's own acceleration. Your trackpad isn't affected.")
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var tiltSection: some View {
+        if model.agentStatus?.devices.contains(where: \.hasTilt) == true {
+            Section {
+                HStack(spacing: 10) {
+                    GestureCell(title: "Left", symbol: "arrow.left.to.line", noneTitle: "Horizontal scroll",
+                                action: $model.settings.tiltLeft)
+                    GestureCell(title: "Right", symbol: "arrow.right.to.line", noneTitle: "Horizontal scroll",
+                                action: $model.settings.tiltRight)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            } header: {
+                Text("Wheel tilt")
+            } footer: {
+                Text("Push the scroll wheel sideways, on mice with a tilt wheel such as the MX Anywhere 2S.")
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

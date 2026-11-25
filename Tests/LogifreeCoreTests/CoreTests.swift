@@ -91,6 +91,17 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(smooth.thumbwheelAction, .smoothScroll)
     }
 
+    func testTiltActionsDefaultToNil() throws {
+        let decoded = try JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
+        XCTAssertNil(decoded.tiltLeft)
+        XCTAssertNil(decoded.tiltRight)
+    }
+
+    func testStatusDeviceWithoutHasTiltDecodesAsFalse() throws {
+        let json = #"{"name":"M","isMouse":true,"route":"Bluetooth","slots":[],"canForget":false}"#
+        XCTAssertFalse(try JSONDecoder().decode(AgentStatus.DeviceState.self, from: Data(json.utf8)).hasTilt)
+    }
+
     func testThumbwheelStepperAccumulatesAndKeepsRemainder() {
         var stepper = ThumbwheelStepper()
         XCTAssertEqual(stepper.steps(rotation: 5, stepSize: 12, now: 10.0), 0)
